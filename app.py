@@ -2495,22 +2495,14 @@ def _warmup_browser_sync():
 
 
 async def _keepalive_loop():
-    """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备，同时静默同步仓库更新。"""
+    """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备。"""
     log.info("【自动保活守护进程】已启动，检测周期: 15 分钟")
     await asyncio.sleep(1)
-    try:
-        await asyncio.to_thread(_check_update_sync, True)
-    except Exception:
-        pass
     try:
         await asyncio.to_thread(_warmup_browser_sync)
     except Exception as e:  # noqa: BLE001
         log.warning("【浏览器预热】异常: %s", e)
     while True:
-        try:
-            await asyncio.to_thread(_check_update_sync, True)
-        except Exception:
-            pass
         try:
             await run_keepalive_all(force=False)
         except Exception as e:  # noqa: BLE001
@@ -2841,63 +2833,25 @@ def _upgrade_from_github_sync() -> dict:
 @app.get("/admin/update/check")
 @app.get("/admin/repo/status")
 async def admin_check_update(force: bool = False):
-    """供所有已部署节点实时检测 GitHub 官方仓库是否有新版本更新。"""
-    return await asyncio.to_thread(_check_update_sync, force)
+    """在线更新已禁用：不访问 GitHub，只返回本地版本，避免后台页面触发自动升级。"""
+    ver = str(_read_local_version().get("version") or "")
+    return {"repo_url": REPO_URL, "disabled": True, "local_version": ver, "remote_version": ver,
+            "local_sha": "local", "remote_sha": "local", "remote_msg": "在线更新已禁用",
+            "has_update": False, "up_to_date": True, "highlights": [], "recent_commits": [],
+            "checked_at": int(time.time())}
 
 
 @app.post("/admin/update/upgrade")
 @app.post("/admin/repo/pull")
 async def admin_upgrade_now(payload: dict = Body(default={}), _=Depends(auth)):
     """一键从 GitHub 官方仓库拉取最新更新并自动平滑重启服务。"""
-    res = await asyncio.to_thread(_upgrade_from_github_sync)
-    restart = payload.get("restart", True) if isinstance(payload, dict) else True
-    if restart:
-        def _delayed_restart():
-            time.sleep(0.5)
-            try:
-                engine.stop()
-            except Exception:
-                pass
-            os._exit(0)
-        threading.Thread(target=_delayed_restart, daemon=True).start()
-    return res
+    raise HTTPException(403, "在线更新已禁用，请通过 git pull 与 docker compose up -d --build 手动更新")
 
 
 @app.post("/admin/repo/push")
 async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
     """维护者专用：将当前节点核心代码推送到 GitHub 仓库（自动过滤 .env 与 data 目录）。"""
-    msg = (payload.get("message") or "").strip() or f"chore: sync update ({time.strftime('%Y-%m-%d %H:%M:%S')})"
-    new_token = (payload.get("github_token") or "").strip()
-    if new_token:
-        _persist_env("GITHUB_TOKEN", new_token)
-        os.environ["GITHUB_TOKEN"] = new_token
-    token = new_token or _read_env_key("GITHUB_TOKEN")
-
-    def _do_push():
-        _ensure_git_repo(token)
-        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
-        _git(["add", "--", *existing_paths])
-        st = _git(["status", "--porcelain", "--", *existing_paths])
-        committed = False
-        if st.stdout.strip():
-            c_res = _git(["commit", "-m", msg])
-            if c_res.returncode != 0:
-                raise HTTPException(500, f"Git commit 失败: {c_res.stderr or c_res.stdout}")
-            committed = True
-        p_res = _git(["push", "origin", "HEAD:main"], timeout=60)
-        if p_res.returncode != 0:
-            err = (p_res.stderr or p_res.stdout or "").strip()
-            raise HTTPException(500, f"Git push 失败: {err[:300]}")
-        _UPDATE_CACHE["ts"] = 0.0
-        status = _check_update_sync(force=True)
-        return {
-            "ok": True,
-            "committed": committed,
-            "message": "已成功提交并推送到 GitHub 仓库",
-            "status": status,
-        }
-
-    return await asyncio.to_thread(_do_push)
+    raise HTTPException(403, "在线推送已禁用")
 
 
 @app.on_event("startup")
